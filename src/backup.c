@@ -17,6 +17,7 @@
 
 #include <backup.h>
 #include <enc_text.h>
+#include <enc_csv.h>
 #include <utils.h>
 
 extern char *aerospike_client_version;  ///< The C client's version string.
@@ -162,12 +163,13 @@ close_file(FILE **fd, void **fd_buf)
 /// @param disk_space  An estimate of the required disk space for the backup file.
 /// @param fd          The file descriptor of the created backup file.
 /// @param fd_buf      The I/O buffer allocated for the file descriptor.
+//  @param is_dsv      true if it file is for dsv dump
 ///
 /// @result            `true`, if successful.
 ///
 static bool
 open_file(uint64_t *bytes, const char *file_path, const char *ns, uint64_t disk_space,
-		FILE **fd, void **fd_buf)
+		FILE **fd, void **fd_buf, bool is_dsv)
 {
 	if (verbose) {
 		ver("Opening backup file %s", file_path);
@@ -213,16 +215,18 @@ open_file(uint64_t *bytes, const char *file_path, const char *ns, uint64_t disk_
 	*fd_buf = safe_malloc(IO_BUF_SIZE);
 	setbuffer(*fd, *fd_buf, IO_BUF_SIZE);
 
-	if (fprintf_bytes(bytes, *fd, "Version " VERSION_3_1 "\n") < 0) {
-		err_code("Error while writing header to backup file %s", file_path);
-		close_file(fd, fd_buf);
-		return false;
-	}
+	if (! is_dsv) {
+		if (fprintf_bytes(bytes, *fd, "Version " VERSION_3_1 "\n") < 0) {
+			err_code("Error while writing header to backup file %s", file_path);
+			close_file(fd, fd_buf);
+			return false;
+		}
 
-	if (fprintf_bytes(bytes, *fd, META_PREFIX META_NAMESPACE " %s\n", escape(ns)) < 0) {
-		err_code("Error while writing meta data to backup file %s", file_path);
-		close_file(fd, fd_buf);
-		return false;
+		if (fprintf_bytes(bytes, *fd, META_PREFIX META_NAMESPACE " %s\n", escape(ns)) < 0) {
+			err_code("Error while writing meta data to backup file %s", file_path);
+			close_file(fd, fd_buf);
+			return false;
+		}
 	}
 
 	return true;
@@ -287,7 +291,7 @@ open_dir_file(per_node_context *pnc)
 	uint64_t bytes = 0;
 
 	if (!open_file(&bytes, file_path, pnc->conf->scan->ns, rec_remain * rec_size,
-			&pnc->fd, &pnc->fd_buf)) {
+			&pnc->fd, &pnc->fd_buf, pnc->conf->delimitor ? true : false)) {
 		return false;
 	}
 
@@ -371,7 +375,7 @@ scan_callback(const as_val *val, void *cont)
 	}
 
 	uint64_t bytes = 0;
-	bool ok = pnc->conf->encoder->put_record(&bytes, pnc->fd, pnc->conf->compact, rec);
+	bool ok = pnc->conf->encoder->put_record(&bytes, pnc->fd, pnc->conf->compact, rec, &pnc->conf->bins);
 
 	if (pnc->conf->estimate) {
 		pnc->samples[*pnc->n_samples] = bytes;
@@ -719,7 +723,7 @@ backup_thread_func(void *cont)
 				ver("Picked up first job, doing one shot work");
 			}
 
-			if (fprintf_bytes(&args.bytes, pnc.fd, META_PREFIX META_FIRST_FILE "\n") < 0) {
+			if (!pnc.conf->delimitor && fprintf_bytes(&args.bytes, pnc.fd, META_PREFIX META_FIRST_FILE "\n") < 0) {
 				err_code("Error while writing meta data to backup file");
 				stop = true;
 				goto close_file;
@@ -761,6 +765,13 @@ backup_thread_func(void *cont)
 
 			wait_one_shot();
 		}
+
+		uint64_t bytes = 0;
+		bool ok = pnc.conf->encoder->put_header(&bytes, pnc.fd, &pnc.conf->bins);
+		if (! ok) {
+			// TODO : fail
+		}
+		bytes = 0;
 
 		as_error ae;
 
@@ -1669,6 +1680,10 @@ usage(const char *name)
 	fprintf(stderr, "  -V, --version\n");
 	fprintf(stderr, "    Display version information.\n\n");
 
+	fprintf(stderr, "  -D, --dsv\n");
+	fprintf(stderr, "    Do dsv dump with specified separator.\n\n");
+
+
 	fprintf(stderr, "  -Z, --usage\n");
 	fprintf(stderr, "    Display this message.\n\n");
 
@@ -1795,6 +1810,7 @@ main(int32_t argc, char **argv)
 	backup_config conf;
 	conf.policy = &policy;
 	conf.scan = &scan;
+	conf.delimitor = NULL;
 	conf.directory = NULL;
 	conf.output_file = NULL;
 	conf.compact = false;
@@ -1807,7 +1823,7 @@ main(int32_t argc, char **argv)
 	conf.no_udfs = false;
 	conf.file_limit = DEFAULT_FILE_LIMIT * 1024 * 1024;
 	conf.encoder = &(backup_encoder){
-		text_put_record, text_put_udf_file, text_put_secondary_index
+		text_put_header, text_put_record, text_put_udf_file, text_put_secondary_index
 	};
 
 	as_config_tls tls;
@@ -1816,7 +1832,7 @@ main(int32_t argc, char **argv)
 	int32_t opt;
 	uint64_t tmp;
 
-	while ((opt = getopt_long(argc, argv, "h:p:U:P::n:s:d:o:F:rf:cvxCB:w:l:%:m:eN:RIuVZa:b:",
+	while ((opt = getopt_long(argc, argv, "h:p:U:P::n:s:d:o:F:rf:cvxCB:w:l:%:m:eN:RIuVZa:b:D:",
 			options, 0)) != -1) {
 		switch (opt) {
 		case 'h':
@@ -2020,6 +2036,11 @@ main(int32_t argc, char **argv)
 
 			break;
 
+		case 'D':
+			conf.delimitor = safe_strdup(optarg);
+			break;
+
+
 		default:
 			usage(argv[0]);
 			goto cleanup1;
@@ -2141,6 +2162,26 @@ main(int32_t argc, char **argv)
 					strcmp(conf.output_file, "-") == 0 ? "[stdout]" : conf.output_file :
 					conf.directory != NULL ?
 							conf.directory : "[none]");
+
+	// Cache bins for csv dump
+	if (conf.delimitor) {
+		if (! bin_list) {
+			err("Cannot do dsv dump with bin list. Specify bin list using option -B");
+			goto cleanup2;
+		}
+		char* bins_str = strdup(bin_list);
+		as_vector_inita(&conf.bins, sizeof (void *), 25);
+		split_string(bins_str, ',', true, &conf.bins);
+
+		csv_set_delimitor(conf.delimitor);
+
+		conf.encoder = &(backup_encoder){
+			csv_put_header, csv_put_record, csv_put_udf_file, csv_put_secondary_index
+		};
+
+		// In case of csv deserialize
+		scan.deserialize_list_map = true;
+	}
 
 	if (bin_list != NULL && !init_scan_bins(bin_list, &scan)) {
 		err("Error while setting scan bin list");
@@ -2277,7 +2318,7 @@ main(int32_t argc, char **argv)
 	// backing up to a single backup file: open the file now and store the file descriptor in
 	// backup_args.shared_fd; it'll be shared by all backup threads
 	if (conf.output_file != NULL && !open_file(&backup_args.bytes, conf.output_file, conf.scan->ns,
-			0, &backup_args.shared_fd, &fd_buf)) {
+			0, &backup_args.shared_fd, &fd_buf, conf.delimitor ? true : false)) {
 		err("Error while opening shared backup file");
 		goto cleanup7;
 	}
@@ -2426,4 +2467,24 @@ cleanup1:
 	}
 
 	return res;
+}
+
+bool
+csv_put_udf_file(uint64_t *bytes, FILE *fd, const as_udf_file *file)
+{
+	bytes = bytes;
+	fd = fd;
+	file = file;
+	// NOOP
+	return true;
+}
+
+bool
+csv_put_secondary_index(uint64_t *bytes, FILE *fd, const index_param *index)
+{
+	bytes = bytes;
+	fd = fd;
+	index = index;
+	// NOOP
+	return true;
 }

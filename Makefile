@@ -75,8 +75,8 @@ endif
 src_to_obj = $(1:$(DIR_SRC)/%.c=$(DIR_OBJ)/%.o)
 obj_to_dep = $(1:%.o=%.d)
 
-BACKUP_INC := $(DIR_INC)/backup.h $(DIR_INC)/enc_text.h $(DIR_INC)/shared.h $(DIR_INC)/utils.h
-BACKUP_SRC := $(DIR_SRC)/backup.c $(DIR_SRC)/utils.c $(DIR_SRC)/enc_text.c
+BACKUP_INC := $(DIR_INC)/backup.h $(DIR_INC)/enc_text.h $(DIR_INC)/enc_csv.h $(DIR_INC)/shared.h $(DIR_INC)/utils.h
+BACKUP_SRC := $(DIR_SRC)/backup.c $(DIR_SRC)/enc_csv.c $(DIR_SRC)/utils.c $(DIR_SRC)/enc_text.c
 BACKUP_OBJ := $(call src_to_obj, $(BACKUP_SRC))
 BACKUP_DEP := $(call obj_to_dep, $(BACKUP_OBJ))
 
